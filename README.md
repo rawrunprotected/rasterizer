@@ -1,1 +1,3 @@
 # rasterizer
+
+All rights reserved.
