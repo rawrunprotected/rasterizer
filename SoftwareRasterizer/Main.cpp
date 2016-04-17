@@ -20,12 +20,22 @@
 
 using namespace DirectX;
 
-static constexpr uint32_t WINDOW_WIDTH = 960;
-static constexpr uint32_t WINDOW_HEIGHT = 544;
+static constexpr uint32_t WINDOW_WIDTH = 1280;
+static constexpr uint32_t WINDOW_HEIGHT = 720;
 
+#if 1
+#define SCENE "Castle"
+#define FOV 0.628f
+XMVECTOR g_cameraPosition = XMVectorSet(27.0f, 2.0f, 47.0f, 0.0f);
+XMVECTOR g_cameraDirection = XMVectorSet(0.142582759f, 0.0611068942f, -0.987894833f, 0.0f);
+XMVECTOR g_upVector = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+#else
+#define SCENE "Sponza"
+#define FOV 1.04f
 XMVECTOR g_cameraPosition = XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f);
 XMVECTOR g_cameraDirection = XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f);
 XMVECTOR g_upVector = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+#endif
 
 std::unique_ptr<Rasterizer> g_rasterizer;
 
@@ -40,20 +50,9 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
   std::vector<uint32_t> indices;
 
   {
-    std::ifstream inFile("VertexBuffer.bin", std::ifstream::binary);
-
-    inFile.seekg(0, std::ifstream::end);
-    auto size = inFile.tellg();
-    inFile.seekg(0);
-
-    auto numVertices = size / sizeof vertices[0];
-
-    vertices.resize(numVertices);
-    inFile.read(reinterpret_cast<char*>(&vertices[0]), numVertices * sizeof vertices[0]);
-  }
-
-  {
-    std::ifstream inFile("IndexBuffer.bin", std::ifstream::binary);
+    std::stringstream fileName;
+    fileName << SCENE << "/IndexBuffer.bin";
+    std::ifstream inFile(fileName.str(), std::ifstream::binary);
 
     inFile.seekg(0, std::ifstream::end);
     auto size = inFile.tellg();
@@ -63,6 +62,21 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 
     indices.resize(numIndices);
     inFile.read(reinterpret_cast<char*>(&indices[0]), numIndices * sizeof indices[0]);
+  }
+
+  {
+    std::stringstream fileName;
+    fileName << SCENE << "/VertexBuffer.bin";
+    std::ifstream inFile(fileName.str(), std::ifstream::binary);
+
+    inFile.seekg(0, std::ifstream::end);
+    auto size = inFile.tellg();
+    inFile.seekg(0);
+
+    auto numVertices = size / sizeof vertices[0];
+
+    vertices.resize(numVertices);
+    inFile.read(reinterpret_cast<char*>(&vertices[0]), numVertices * sizeof vertices[0]);
   }
 
   indices = QuadDecomposition::decompose(indices, vertices);
@@ -149,7 +163,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
   {
   case WM_PAINT:
   {
-    XMMATRIX projMatrix = XMMatrixPerspectiveFovLH(1.04f, float(WINDOW_WIDTH) / float(WINDOW_HEIGHT), 1.0f, 500.0f);
+    XMMATRIX projMatrix = XMMatrixPerspectiveFovLH(FOV, float(WINDOW_WIDTH) / float(WINDOW_HEIGHT), 1.0f, 5000.0f);
     XMMATRIX viewMatrix = XMMatrixLookToLH(g_cameraPosition, g_cameraDirection, g_upVector);
     XMMATRIX viewProjection = (XMMatrixMultiply(viewMatrix, projMatrix));
 

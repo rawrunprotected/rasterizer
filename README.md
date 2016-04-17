@@ -1,3 +1,26 @@
 # rasterizer
 
-All rights reserved.
+This project is a state-of-the-art software occlusion culling system.
+
+It's similar in spirit to Intel's https://github.com/GameTechDev/OcclusionCulling, but uses completely different techniques and is 2-3 times faster in single-threaded AVX mode when rendering the full set of occluders (no minimum size).
+
+Checkout http://threadlocalmutex.com/?p=144 for some implementation details.
+
+Sample Data
+===========
+
+The folder Sponza contains a copy of Crytek's public domain Sponza model.
+
+The folder Castle contains a copy of Intel's Occlusion Culling sample scene, redistributed here under the terms of the Intel Code Samples License.
+
+Controls are WASD and cursor keys for the camera.
+
+Requirements
+============
+- An AVX2-capable CPU (Haswell, Excavator or later)
+- Visual Studio 2015 or higher
+
+License
+============
+
+I haven't decided on an open-source license yet, feel free to ping me if you have suggestions. Until then, all rights to the source code portions of this project are reserved.
