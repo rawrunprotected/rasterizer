@@ -83,8 +83,8 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 
   g_rasterizer = std::make_unique<Rasterizer>(WINDOW_WIDTH, WINDOW_HEIGHT);
 
-  // Pad to a multiple of 4 quads
-  while (indices.size() % 16 != 0)
+  // Pad to a multiple of 8 quads
+  while (indices.size() % 32 != 0)
   {
     indices.push_back(indices[0]);
   }
@@ -100,7 +100,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     quadAabbs.push_back(aabb);
   }
 
-  auto batchAssignment = SurfaceAreaHeuristic::generateBatches(quadAabbs, 512, 4);
+  auto batchAssignment = SurfaceAreaHeuristic::generateBatches(quadAabbs, 512, 8);
 
   Aabb refAabb;
   for (auto v : vertices)
@@ -204,7 +204,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     float rasterTime = std::chrono::duration<float, std::milli>(raster_end - raster_start).count();
     static float avgRasterTime = rasterTime;
 
-    float alpha = 0.035f;
+    float alpha = 0.0035f;
     avgRasterTime = rasterTime * alpha + avgRasterTime * (1.0f - alpha);
 
     int fps = int(1000.0f / avgRasterTime);
@@ -248,7 +248,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     auto now = std::chrono::high_resolution_clock::now();
 
     XMVECTOR right = XMVector3Normalize(XMVector3Cross(g_cameraDirection, g_upVector));
-    float translateSpeed = 0.005f * std::chrono::duration<float, std::milli>(now - lastPaint).count();
+    float translateSpeed = 0.01f * std::chrono::duration<float, std::milli>(now - lastPaint).count();
     float rotateSpeed = 0.002f * std::chrono::duration<float, std::milli>(now - lastPaint).count();
 
     lastPaint = now;

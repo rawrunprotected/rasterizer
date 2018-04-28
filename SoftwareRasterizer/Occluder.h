@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <vector>
+#include <intrin.h>
 
 struct Occluder
 {
@@ -15,7 +16,8 @@ struct Occluder
 	__m128 m_boundsMin;
 	__m128 m_boundsMax;
 
-	std::vector<__m128i> m_vertexData;
+	__m256i* m_vertexData;
+	uint32_t m_packetCount;
 };
 
 

@@ -5,6 +5,9 @@
 #include <memory>
 #include <vector>
 
+// Enable to make use of PDEP instructions (SkyLake or later CPUs)
+#define SUPPORTS_PDEP
+
 struct Occluder;
 
 class Rasterizer
@@ -21,20 +24,29 @@ public:
 
 	bool queryVisibility(__m128 boundsMin, __m128 boundsMax, bool& needsClipping);
 
-	bool query2D(uint32_t minX, uint32_t maxX, uint32_t minY, uint32_t maxY, uint32_t maxZ);
+	bool query2D(uint32_t minX, uint32_t maxX, uint32_t minY, uint32_t maxY, uint32_t maxZ) const;
 
 	void readBackDepth(void* target) const;
   
 private:
 	static float decompressFloat(uint16_t depth);
 
-	static void normalizeEdge(__m128& nx, __m128& ny, __m128& invLen);
+	static void transpose256(__m256 A, __m256 B, __m256 C, __m256 D, __m128 out[8]);
+	static void transpose256i(__m256i A, __m256i B, __m256i C, __m256i D, __m128i out[8]);
+
+	template<bool possiblyNearClipped>
+	static void normalizeEdge(__m256& nx, __m256& ny, __m256& invLen, __m256 edgeFlipMask);
 
 	static __m128i quantizeSlopeLookup(__m128 nx, __m128 ny);
+	static __m256i quantizeSlopeLookup(__m256 nx, __m256 ny);
 
 	static uint32_t quantizeOffsetLookup(float offset);
 
 	static __m128i packDepthPremultiplied(__m128 depthA, __m128 depthB);
+	static __m256i packDepthPremultiplied(__m256 depthA, __m256 depthB);
+	static __m128i packDepthPremultiplied(__m256 depth);
+
+	static uint64_t transposeMask(uint64_t mask);
 
 	void precomputeRasterizationTable();
 

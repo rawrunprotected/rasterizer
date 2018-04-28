@@ -41,7 +41,7 @@ std::unique_ptr<Occluder> Occluder::bake(const std::vector<__m128>& vertices, __
       __m128 normal = quadNormals[j];
 
       __m128 bestDistance = _mm_set1_ps(-std::numeric_limits<float>::infinity());
-      int bestCentroid = -1;
+      uint32_t bestCentroid = 0;
       for (int k = 0; k < centroids.size(); ++k)
       {
         __m128 distance = _mm_dp_ps(centroids[k], normal, 0x7F);
@@ -78,7 +78,7 @@ std::unique_ptr<Occluder> Occluder::bake(const std::vector<__m128>& vertices, __
   }
 
   std::vector<__m128> orderedVertices;
-  for (int k = 0; k < centroids.size(); ++k)
+  for (uint32_t k = 0; k < centroids.size(); ++k)
   {
     for (int j = 0; j < vertices.size() / 4; ++j)
     {
@@ -102,33 +102,58 @@ std::unique_ptr<Occluder> Occluder::bake(const std::vector<__m128>& vertices, __
 
   __m128 half = _mm_set1_ps(0.5f);
 
-  for (size_t i = 0; i < orderedVertices.size(); i += 16)
+  occluder->m_packetCount = 0;
+  occluder->m_vertexData = reinterpret_cast<__m256i*>(_aligned_malloc(orderedVertices.size() * 4, 32));
+
+  for (size_t i = 0; i < orderedVertices.size(); i += 32)
   {
+	  __m128i v[8];
+
     for (auto j = 0; j < 4; ++j)
     {
       // Transform into [0,1] space relative to bounding box
-      __m128 v0 = _mm_mul_ps(_mm_sub_ps(orderedVertices[i + j + 0], refMin), invExtents);
-      __m128 v1 = _mm_mul_ps(_mm_sub_ps(orderedVertices[i + j + 4], refMin), invExtents);
-      __m128 v2 = _mm_mul_ps(_mm_sub_ps(orderedVertices[i + j + 8], refMin), invExtents);
+      __m128 v0 = _mm_mul_ps(_mm_sub_ps(orderedVertices[i + j +  0], refMin), invExtents);
+      __m128 v1 = _mm_mul_ps(_mm_sub_ps(orderedVertices[i + j +  4], refMin), invExtents);
+      __m128 v2 = _mm_mul_ps(_mm_sub_ps(orderedVertices[i + j +  8], refMin), invExtents);
       __m128 v3 = _mm_mul_ps(_mm_sub_ps(orderedVertices[i + j + 12], refMin), invExtents);
+	  __m128 v4 = _mm_mul_ps(_mm_sub_ps(orderedVertices[i + j + 16], refMin), invExtents);
+	  __m128 v5 = _mm_mul_ps(_mm_sub_ps(orderedVertices[i + j + 20], refMin), invExtents);
+	  __m128 v6 = _mm_mul_ps(_mm_sub_ps(orderedVertices[i + j + 24], refMin), invExtents);
+	  __m128 v7 = _mm_mul_ps(_mm_sub_ps(orderedVertices[i + j + 28], refMin), invExtents);
 
       // Transpose into [xxxx][yyyy][zzzz][wwww]
       _MM_TRANSPOSE4_PS(v0, v1, v2, v3);
+	  _MM_TRANSPOSE4_PS(v4, v5, v6, v7);
 
       // Scale and truncate to int
       v0 = _mm_fmadd_ps(v0, scalingX, half);
       v1 = _mm_fmadd_ps(v1, scalingY, half);
       v2 = _mm_fmadd_ps(v2, scalingZ, half);
 
-      __m128i X = _mm_cvttps_epi32(v0);
-      __m128i Y = _mm_cvttps_epi32(v1);
-      __m128i Z = _mm_cvttps_epi32(v2);
+	  v4 = _mm_fmadd_ps(v4, scalingX, half);
+	  v5 = _mm_fmadd_ps(v5, scalingY, half);
+	  v6 = _mm_fmadd_ps(v6, scalingZ, half);
+
+      __m128i X0 = _mm_sub_epi32(_mm_cvttps_epi32(v0), _mm_set1_epi32(1024));
+      __m128i Y0 = _mm_cvttps_epi32(v1);
+      __m128i Z0 = _mm_cvttps_epi32(v2);
+
+	  __m128i X1 = _mm_sub_epi32(_mm_cvttps_epi32(v4), _mm_set1_epi32(1024));
+	  __m128i Y1 = _mm_cvttps_epi32(v5);
+	  __m128i Z1 = _mm_cvttps_epi32(v6);
 
       // Pack to 11/11/10 format
-      __m128i XYZ = _mm_or_si128(_mm_slli_epi32(X, 21), _mm_or_si128(_mm_slli_epi32(Y, 10), Z));
+      __m128i XYZ0 = _mm_or_si128(_mm_slli_epi32(X0, 21), _mm_or_si128(_mm_slli_epi32(Y0, 10), Z0));
+	  __m128i XYZ1 = _mm_or_si128(_mm_slli_epi32(X1, 21), _mm_or_si128(_mm_slli_epi32(Y1, 10), Z1));
 
-      occluder->m_vertexData.push_back(XYZ);
+	  v[2 * j + 0] = XYZ0;
+	  v[2 * j + 1] = XYZ1;
     }
+
+	occluder->m_vertexData[occluder->m_packetCount++] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + 0));
+	occluder->m_vertexData[occluder->m_packetCount++] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + 2));
+	occluder->m_vertexData[occluder->m_packetCount++] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + 4));
+	occluder->m_vertexData[occluder->m_packetCount++] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + 6));
   }
 
   occluder->m_refMin = refMin;
