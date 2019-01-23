@@ -1,6 +1,7 @@
 #pragma once
 
 #include <xmmintrin.h>
+#include <immintrin.h>
 
 #include <memory>
 #include <vector>

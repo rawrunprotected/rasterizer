@@ -1,6 +1,7 @@
 #pragma once
 
 #include <xmmintrin.h>
+#include <smmintrin.h>
 
 // Cross product
 inline __m128 cross(__m128 a, __m128 b)
