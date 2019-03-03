@@ -15,8 +15,10 @@
 #include <fstream>
 #include <iomanip>
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <vector>
+#include <thread>
 
 using namespace DirectX;
 
@@ -41,6 +43,8 @@ std::unique_ptr<Rasterizer> g_rasterizer;
 
 HBITMAP g_hBitmap;
 std::vector<std::unique_ptr<Occluder>> g_occluders;
+
+std::vector<char> g_rawData;
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 
@@ -123,6 +127,8 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     g_occluders.push_back(Occluder::bake(batchVertices, refAabb.m_min, refAabb.m_max));
   }
 
+  g_rawData.resize(WINDOW_WIDTH * WINDOW_HEIGHT * 4);
+
   WNDCLASSEXW wcex = {};
 
   wcex.cbSize = sizeof(WNDCLASSEX);
@@ -176,11 +182,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     g_rasterizer->setModelViewProjection(mvp);
 
     // Sort front to back
-    std::sort(begin(g_occluders), end(g_occluders), [&](const auto& o1, const auto& o2) {
+    std::sort(begin(g_occluders), end(g_occluders), [&](const auto & o1, const auto & o2) {
       __m128 dist1 = _mm_sub_ps(o1->m_center, g_cameraPosition);
       __m128 dist2 = _mm_sub_ps(o2->m_center, g_cameraPosition);
 
-      return _mm_comile_ss(_mm_dp_ps(dist1, dist1, 0x7f), _mm_dp_ps(dist2, dist2, 0x7f));
+      return _mm_comilt_ss(_mm_dp_ps(dist1, dist1, 0x7f), _mm_dp_ps(dist2, dist2, 0x7f));
     });
 
     for (const auto& occluder : g_occluders)
@@ -201,22 +207,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
     auto raster_end = std::chrono::high_resolution_clock::now();
 
-    float rasterTime = std::chrono::duration<float, std::milli>(raster_end - raster_start).count();
-    static float avgRasterTime = rasterTime;
+    double rasterTime = std::chrono::duration<double, std::milli>(raster_end - raster_start).count();
 
-    float alpha = 0.0035f;
-    avgRasterTime = rasterTime * alpha + avgRasterTime * (1.0f - alpha);
+    static std::vector<double> samples;
+
+    samples.push_back(rasterTime);
+
+    double avgRasterTime = std::accumulate(samples.begin(), samples.end(), 0.0) / samples.size();
+    double sqSum = std::inner_product(samples.begin(), samples.end(), samples.begin(), 0.0);
+    double stDev = std::sqrt(sqSum / samples.size() - avgRasterTime * avgRasterTime);
+
+    std::nth_element(samples.begin(), samples.begin() + samples.size() / 2, samples.end());
+    double median = samples[samples.size() / 2];
 
     int fps = int(1000.0f / avgRasterTime);
 
     std::wstringstream title;
-    title << L"FPS: " << fps << std::setprecision(3) << L"      Rasterization time: " << avgRasterTime << "ms";
+    title << L"FPS: " << fps << std::setprecision(3) << L"      Rasterization time: " << avgRasterTime << "±" << stDev << "ms stddev / " << median << "ms median";
     SetWindowText(hWnd, title.str().c_str());
 
-    std::vector<char> rawData;
-    rawData.resize(WINDOW_WIDTH * WINDOW_HEIGHT * 4);
-
-    g_rasterizer->readBackDepth(&*rawData.begin());
+    g_rasterizer->readBackDepth(&*g_rawData.begin());
 
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hWnd, &ps);
@@ -230,7 +240,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     info.bmiHeader.biPlanes = 1;
     info.bmiHeader.biBitCount = 32;
     info.bmiHeader.biCompression = BI_RGB;
-    SetDIBits(hdcMem, g_hBitmap, 0, WINDOW_HEIGHT, &*rawData.begin(), &info, DIB_PAL_COLORS);
+    SetDIBits(hdcMem, g_hBitmap, 0, WINDOW_HEIGHT, &*g_rawData.begin(), &info, DIB_RGB_COLORS);
 
     BITMAP bm;
     HGDIOBJ hbmOld = SelectObject(hdcMem, g_hBitmap);

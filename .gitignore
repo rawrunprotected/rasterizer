@@ -18,3 +18,9 @@
 *.cfg
 *.vtss
 *.aux
+*.ipch
+*.options
+*.th
+*.sc
+*.trace
+*.vspx

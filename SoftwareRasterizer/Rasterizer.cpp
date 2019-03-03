@@ -4,16 +4,63 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 
 static constexpr float floatCompressionBias = 2.5237386e-29f; // 0xFFFF << 12 reinterpreted as float
 static constexpr float minEdgeOffset = -0.45f;
-static constexpr float oneOverFloatMax = 1.0f / std::numeric_limits<float>::max();
+static const     float maxInvW = std::sqrt(std::numeric_limits<float>::max());
 
 static constexpr int OFFSET_QUANTIZATION_BITS = 6;
 static constexpr int OFFSET_QUANTIZATION_FACTOR = 1 << OFFSET_QUANTIZATION_BITS;
 
 static constexpr int SLOPE_QUANTIZATION_BITS = 6;
 static constexpr int SLOPE_QUANTIZATION_FACTOR = 1 << SLOPE_QUANTIZATION_BITS;
+
+enum PrimitiveMode {
+	Culled = 0,
+	Triangle0,
+	Triangle1,
+	ConcaveRight,
+	ConcaveLeft,
+	ConcaveCenter,
+	Convex
+};
+
+static constexpr int modeTable[256] =
+{
+	Convex,        Triangle1,     ConcaveLeft,   Triangle1,     Triangle0,     Culled,        Triangle0,     Culled,
+	ConcaveRight,  Triangle1,     Culled,        Triangle1,     Triangle0,     Culled,        Triangle0,     Culled,
+	Culled,        Triangle0,     Culled,        Triangle0,     Triangle1,     Culled,        Triangle1,     ConcaveCenter,
+	Culled,        Triangle0,     Culled,        Triangle0,     Triangle1,     Convex,        Triangle1,     ConcaveLeft,
+	Triangle1,     ConcaveCenter, Triangle1,     ConcaveRight,  Culled,        Culled,        Culled,        Triangle0,
+	Triangle1,     ConcaveLeft,   Culled,        Convex,        Culled,        Triangle0,     Culled,        Triangle0,
+	Triangle0,     Culled,        Triangle0,     Culled,        ConcaveLeft,   Culled,        Convex,        Triangle1,
+	Triangle0,     Culled,        Culled,        Culled,        ConcaveCenter, Triangle1,     ConcaveRight,  Triangle1,
+	Culled,        Triangle0,     Culled,        Triangle0,     Triangle1,     Culled,        Triangle1,     Convex,
+	Culled,        Triangle0,     Culled,        Triangle0,     Triangle1,     ConcaveCenter, Triangle1,     ConcaveRight,
+	ConcaveCenter, Triangle1,     ConcaveCenter, Triangle1,     Triangle0,     Culled,        Triangle0,     Culled,
+	ConcaveCenter, Triangle1,     Culled,        Triangle1,     Triangle0,     Culled,        Triangle0,     Culled,
+	Triangle0,     Culled,        Triangle0,     Culled,        ConcaveRight,  Culled,        ConcaveCenter, Triangle1,
+	Triangle0,     Culled,        Culled,        Culled,        Convex,        Triangle1,     ConcaveLeft,   Triangle1,
+	Triangle1,     Triangle1,     Triangle1,     Triangle1,     Culled,        Culled,        Culled,        Culled,
+	Triangle1,     Triangle1,     Culled,        Triangle1,     Culled,        Culled,        Culled,        Culled,
+	Triangle0,     Culled,        Triangle0,     Culled,        ConcaveCenter, Culled,        ConcaveRight,  Triangle1,
+	Triangle0,     Culled,        Culled,        Culled,        ConcaveLeft,   Triangle1,     Convex,        Triangle1,
+	Triangle1,     ConcaveLeft,   Triangle1,     Convex,        Culled,        Culled,        Culled,        Triangle0,
+	Triangle1,     ConcaveCenter, Culled,        ConcaveRight,  Culled,        Triangle0,     Culled,        Triangle0,
+	Culled,        Triangle0,     Culled,        Triangle0,     Triangle1,     Culled,        Triangle1,     ConcaveLeft,
+	Culled,        Triangle0,     Culled,        Triangle0,     Triangle1,     ConcaveRight,  Triangle1,     ConcaveCenter,
+	ConcaveRight,  Triangle1,     ConcaveCenter, Triangle1,     Triangle0,     Culled,        Triangle0,     Culled,
+	ConcaveRight,  Triangle1,     Culled,        Triangle1,     Triangle0,     Culled,        Triangle0,     Culled,
+	Triangle1,     ConcaveRight,  Triangle1,     ConcaveCenter, Culled,        Culled,        Culled,        Triangle0,
+	Triangle1,     Convex,        Culled,        ConcaveLeft,   Culled,        Triangle0,     Culled,        Triangle0,
+	Triangle0,     Culled,        Triangle0,     Culled,        Triangle0,     Culled,        Triangle0,     Culled,
+	Triangle0,     Culled,        Culled,        Culled,        Triangle0,     Culled,        Triangle0,     Culled,
+	ConcaveLeft,   Triangle1,     ConcaveLeft,   Triangle1,     Triangle0,     Culled,        Triangle0,     Culled,
+	ConcaveCenter, Triangle1,     Culled,        Triangle1,     Triangle0,     Culled,        Triangle0,     Culled,
+	Culled,        Culled,        Culled,        Culled,        Culled,        Culled,        Culled,        Culled,
+	Culled,        Culled,        Culled,        Culled,        Culled,        Culled,        Culled,        Culled,
+};
 
 Rasterizer::Rasterizer(uint32_t width, uint32_t height) : m_width(width), m_height(height), m_blocksX(width / 8), m_blocksY(height / 8)
 {
@@ -40,9 +87,9 @@ void Rasterizer::setModelViewProjection(const float* matrix)
 	_mm_storeu_ps(m_modelViewProjectionRaw + 8, mat2);
 	_mm_storeu_ps(m_modelViewProjectionRaw + 12, mat3);
 
-	// Bake viewport transform into matrix
-	mat0 = _mm_mul_ps(_mm_add_ps(mat0, mat3), _mm_set1_ps(m_width * 0.5f));
-	mat1 = _mm_mul_ps(_mm_add_ps(mat1, mat3), _mm_set1_ps(m_height * 0.5f));
+	// Bake viewport transform into matrix and 6shift by half a block
+	mat0 = _mm_mul_ps(_mm_add_ps(mat0, mat3), _mm_set1_ps(m_width * 0.5f - 4.0f));
+	mat1 = _mm_mul_ps(_mm_add_ps(mat1, mat3), _mm_set1_ps(m_height * 0.5f - 4.0f));
 
 	// Map depth from [-1, 1] to [bias, 0]
 	mat2 = _mm_mul_ps(_mm_sub_ps(mat3, mat2), _mm_set1_ps(0.5f * floatCompressionBias));
@@ -58,8 +105,18 @@ void Rasterizer::setModelViewProjection(const float* matrix)
 
 void Rasterizer::clear()
 {
-	memset(&*m_depthBuffer.begin(), 0, m_depthBuffer.size() * sizeof m_depthBuffer[0]);
-	memset(&*m_hiZ.begin(), 0, m_hiZ.size() * sizeof m_hiZ[0]);
+	// Mark blocks as cleared by setting Hi Z to 1 (one unit separated from far plane). 
+	// This value is extremely unlikely to occur during normal rendering, so we don't
+	// need to guard against a HiZ of 1 occuring naturally. This is different from a value of 0, 
+	// which will occur every time a block is partially covered for the first time.
+	__m128i clearValue = _mm_set1_epi16(1);
+	uint32_t count = static_cast<uint32_t>(m_hiZ.size()) / 8;
+	__m128i* pHiZ = reinterpret_cast<__m128i*>(m_hiZ.data());
+	for (uint32_t offset = 0; offset < count; ++offset)
+	{
+		_mm_storeu_si128(pHiZ, clearValue);
+		pHiZ++;
+	}
 }
 
 bool Rasterizer::queryVisibility(__m128 boundsMin, __m128 boundsMax, bool& needsClipping)
@@ -298,6 +355,16 @@ void Rasterizer::readBackDepth(void* target) const
 	{
 		for (uint32_t blockX = 0; blockX < m_blocksX; ++blockX)
 		{
+			if (m_hiZ[blockY * m_blocksX + blockX] == 1)
+			{
+				for (uint32_t y = 0; y < 8; ++y)
+				{
+					uint8_t* dest = (uint8_t*)target + 4 * (8 * blockX + m_width * (8 * blockY + y));
+					memset(dest, 0, 32);
+				}
+				continue;
+			}
+
 			const __m128i* source = &m_depthBuffer[8 * (blockY * m_blocksX + blockX)];
 			for (uint32_t y = 0; y < 8; ++y)
 			{
@@ -330,7 +397,7 @@ void Rasterizer::readBackDepth(void* target) const
 	}
 }
 
-float Rasterizer::decompressFloat(uint16_t depth)
+__forceinline float Rasterizer::decompressFloat(uint16_t depth)
 {
 	const float bias = 3.9623753e+28f; // 1.0f / floatCompressionBias
 
@@ -344,7 +411,7 @@ float Rasterizer::decompressFloat(uint16_t depth)
 	return f * bias;
 }
 
-void  Rasterizer::transpose256(__m256 A, __m256 B, __m256 C, __m256 D, __m128 out[8])
+__forceinline void Rasterizer::transpose256(__m256 A, __m256 B, __m256 C, __m256 D, __m128 out[8])
 {
 	__m256 _Tmp3, _Tmp2, _Tmp1, _Tmp0;
 	_Tmp0 = _mm256_shuffle_ps(A, B, 0x44);
@@ -357,20 +424,13 @@ void  Rasterizer::transpose256(__m256 A, __m256 B, __m256 C, __m256 D, __m128 ou
 	C = _mm256_shuffle_ps(_Tmp2, _Tmp3, 0x88);
 	D = _mm256_shuffle_ps(_Tmp2, _Tmp3, 0xDD);
 
-#if defined(SUPPORTS_PDEP)
 	_mm256_store_ps(reinterpret_cast<float*>(out + 0), A);
 	_mm256_store_ps(reinterpret_cast<float*>(out + 2), B);
 	_mm256_store_ps(reinterpret_cast<float*>(out + 4), C);
 	_mm256_store_ps(reinterpret_cast<float*>(out + 6), D);
-#else
-	_mm256_storeu2_m128(reinterpret_cast<float*>(out + 4), reinterpret_cast<float*>(out + 0), A);
-	_mm256_storeu2_m128(reinterpret_cast<float*>(out + 5), reinterpret_cast<float*>(out + 1), B);
-	_mm256_storeu2_m128(reinterpret_cast<float*>(out + 6), reinterpret_cast<float*>(out + 2), C);
-	_mm256_storeu2_m128(reinterpret_cast<float*>(out + 7), reinterpret_cast<float*>(out + 3), D);
-#endif
 }
 
-void Rasterizer::transpose256i(__m256i A, __m256i B, __m256i C, __m256i D, __m128i out[8])
+__forceinline void Rasterizer::transpose256i(__m256i A, __m256i B, __m256i C, __m256i D, __m128i out[8])
 {
 	__m256i _Tmp3, _Tmp2, _Tmp1, _Tmp0;
 	_Tmp0 = _mm256_unpacklo_epi32(A, B);
@@ -382,24 +442,17 @@ void Rasterizer::transpose256i(__m256i A, __m256i B, __m256i C, __m256i D, __m12
 	C = _mm256_unpacklo_epi64(_Tmp2, _Tmp3);
 	D = _mm256_unpackhi_epi64(_Tmp2, _Tmp3);
 
-#if defined(SUPPORTS_PDEP)
 	_mm256_store_si256(reinterpret_cast<__m256i*>(out + 0), A);
 	_mm256_store_si256(reinterpret_cast<__m256i*>(out + 2), B);
 	_mm256_store_si256(reinterpret_cast<__m256i*>(out + 4), C);
 	_mm256_store_si256(reinterpret_cast<__m256i*>(out + 6), D);
-#else
-	_mm256_storeu2_m128i(out + 4, out + 0, A);
-	_mm256_storeu2_m128i(out + 5, out + 1, B);
-	_mm256_storeu2_m128i(out + 6, out + 2, C);
-	_mm256_storeu2_m128i(out + 7, out + 3, D);
-#endif
 }
 
 template<bool possiblyNearClipped>
-void Rasterizer::normalizeEdge(__m256& nx, __m256& ny, __m256& invLen, __m256 edgeFlipMask)
+__forceinline void Rasterizer::normalizeEdge(__m256& nx, __m256& ny, __m256 edgeFlipMask)
 {
 	__m256 minusZero = _mm256_set1_ps(-0.0f);
-	invLen = _mm256_rcp_ps(_mm256_add_ps(_mm256_andnot_ps(minusZero, nx), _mm256_andnot_ps(minusZero, ny)));
+	__m256 invLen = _mm256_rcp_ps(_mm256_add_ps(_mm256_andnot_ps(minusZero, nx), _mm256_andnot_ps(minusZero, ny)));
 
 	constexpr float maxOffset = -minEdgeOffset;
 	__m256 mul = _mm256_set1_ps((OFFSET_QUANTIZATION_FACTOR - 1) / (maxOffset - minEdgeOffset));
@@ -409,12 +462,11 @@ void Rasterizer::normalizeEdge(__m256& nx, __m256& ny, __m256& invLen, __m256 ed
 	}
 
 	invLen = _mm256_mul_ps(mul, invLen);
-
 	nx = _mm256_mul_ps(nx, invLen);
 	ny = _mm256_mul_ps(ny, invLen);
 }
 
-__m128i Rasterizer::quantizeSlopeLookup(__m128 nx, __m128 ny)
+__forceinline __m128i Rasterizer::quantizeSlopeLookup(__m128 nx, __m128 ny)
 {
 	__m128i yNeg = _mm_castps_si128(_mm_cmplt_ps(ny, _mm_setzero_ps()));
 
@@ -426,7 +478,7 @@ __m128i Rasterizer::quantizeSlopeLookup(__m128 nx, __m128 ny)
 	return _mm_slli_epi32(_mm_sub_epi32(_mm_slli_epi32(quantizedSlope, 1), yNeg), OFFSET_QUANTIZATION_BITS);
 }
 
-__m256i Rasterizer::quantizeSlopeLookup(__m256 nx, __m256 ny)
+__forceinline __m256i Rasterizer::quantizeSlopeLookup(__m256 nx, __m256 ny)
 {
 	__m256i yNeg = _mm256_castps_si256(_mm256_cmp_ps(ny, _mm256_setzero_ps(), _CMP_LE_OQ));
 
@@ -440,7 +492,7 @@ __m256i Rasterizer::quantizeSlopeLookup(__m256 nx, __m256 ny)
 }
 
 
-uint32_t Rasterizer::quantizeOffsetLookup(float offset)
+__forceinline uint32_t Rasterizer::quantizeOffsetLookup(float offset)
 {
 	const float maxOffset = -minEdgeOffset;
 
@@ -452,18 +504,18 @@ uint32_t Rasterizer::quantizeOffsetLookup(float offset)
 	return std::min(std::max(int32_t(lookup), 0), OFFSET_QUANTIZATION_FACTOR - 1);
 }
 
-__m128i Rasterizer::packDepthPremultiplied(__m128 depthA, __m128 depthB)
+__forceinline __m128i Rasterizer::packDepthPremultiplied(__m128 depthA, __m128 depthB)
 {
 	return _mm_packus_epi32(_mm_srai_epi32(_mm_castps_si128(depthA), 12), _mm_srai_epi32(_mm_castps_si128(depthB), 12));
 }
 
-__m128i Rasterizer::packDepthPremultiplied(__m256 depth)
+__forceinline __m128i Rasterizer::packDepthPremultiplied(__m256 depth)
 {
 	__m256i x = _mm256_srai_epi32(_mm256_castps_si256(depth), 12);
 	return _mm_packus_epi32(_mm256_castsi256_si128(x), _mm256_extracti128_si256(x, 1));
 }
 
-__m256i Rasterizer::packDepthPremultiplied(__m256 depthA, __m256 depthB)
+__forceinline __m256i Rasterizer::packDepthPremultiplied(__m256 depthA, __m256 depthB)
 {
 	__m256i x1 = _mm256_srai_epi32(_mm256_castps_si256(depthA), 12);
 	__m256i x2 = _mm256_srai_epi32(_mm256_castps_si256(depthB), 12);
@@ -473,7 +525,7 @@ __m256i Rasterizer::packDepthPremultiplied(__m256 depthA, __m256 depthB)
 
 uint64_t Rasterizer::transposeMask(uint64_t mask)
 {
-#if defined(SUPPORTS_PDEP)
+#if 0
 	uint64_t maskA = _pdep_u64(_pext_u64(mask, 0x5555555555555555ull), 0xF0F0F0F0F0F0F0F0ull);
 	uint64_t maskB = _pdep_u64(_pext_u64(mask, 0xAAAAAAAAAAAAAAAAull), 0x0F0F0F0F0F0F0F0Full);
 #else
@@ -537,8 +589,16 @@ void Rasterizer::precomputeRasterizationTable()
 			m_precomputedRasterTables[lookup] |= transposeMask(block);
 		}
 		// For each slope, the first block should be all ones, the last all zeroes
-		assert(m_precomputedRasterTables[slopeLookup] == -1);
-		assert(m_precomputedRasterTables[slopeLookup + OFFSET_QUANTIZATION_FACTOR - 1] == 0);
+
+		if (m_precomputedRasterTables[slopeLookup] != -1)
+		{
+			__debugbreak();
+		}
+
+		if (m_precomputedRasterTables[slopeLookup + OFFSET_QUANTIZATION_FACTOR - 1] != 0)
+		{
+			__debugbreak();
+		}
 	}
 }
 
@@ -617,43 +677,6 @@ void Rasterizer::rasterize(const Occluder& occluder)
 		__m256 Zf2 = _mm256_cvtepi32_ps(_mm256_and_si256(I2, maskZ));
 		__m256 Zf3 = _mm256_cvtepi32_ps(_mm256_and_si256(I3, maskZ));
 
-		__m256 mat30 = _mm256_broadcast_ss(reinterpret_cast<const float*>(&mat3) + 0);
-		__m256 mat31 = _mm256_broadcast_ss(reinterpret_cast<const float*>(&mat3) + 1);
-		__m256 mat32 = _mm256_broadcast_ss(reinterpret_cast<const float*>(&mat3) + 2);
-		__m256 mat33 = _mm256_broadcast_ss(reinterpret_cast<const float*>(&mat3) + 3);
-
-		__m256 W0 = _mm256_fmadd_ps(Xf0, mat30, _mm256_fmadd_ps(Yf0, mat31, _mm256_fmadd_ps(Zf0, mat32, mat33)));
-		__m256 W1 = _mm256_fmadd_ps(Xf1, mat30, _mm256_fmadd_ps(Yf1, mat31, _mm256_fmadd_ps(Zf1, mat32, mat33)));
-		__m256 W2 = _mm256_fmadd_ps(Xf2, mat30, _mm256_fmadd_ps(Yf2, mat31, _mm256_fmadd_ps(Zf2, mat32, mat33)));
-		__m256 W3 = _mm256_fmadd_ps(Xf3, mat30, _mm256_fmadd_ps(Yf3, mat31, _mm256_fmadd_ps(Zf3, mat32, mat33)));
-
-		__m256 minusZero256 = _mm256_set1_ps(-0.0f);
-
-		__m256 primitiveValid = minusZero256;
-
-		__m256 wSign0, wSign1, wSign2, wSign3;
-		if (possiblyNearClipped)
-		{
-			// All W < 0 means fully culled by camera plane
-			primitiveValid = _mm256_andnot_ps(_mm256_and_ps(_mm256_and_ps(W0, W1), _mm256_and_ps(W2, W3)), primitiveValid);
-			if (_mm256_testz_ps(primitiveValid, primitiveValid))
-			{
-				continue;
-			}
-
-			wSign0 = _mm256_and_ps(W0, minusZero256);
-			wSign1 = _mm256_and_ps(W1, minusZero256);
-			wSign2 = _mm256_and_ps(W2, minusZero256);
-			wSign3 = _mm256_and_ps(W3, minusZero256);
-		}
-		else
-		{
-			wSign0 = _mm256_setzero_ps();
-			wSign1 = _mm256_setzero_ps();
-			wSign2 = _mm256_setzero_ps();
-			wSign3 = _mm256_setzero_ps();
-		}
-
 		__m256 mat00 = _mm256_broadcast_ss(reinterpret_cast<const float*>(&mat0) + 0);
 		__m256 mat01 = _mm256_broadcast_ss(reinterpret_cast<const float*>(&mat0) + 1);
 		__m256 mat02 = _mm256_broadcast_ss(reinterpret_cast<const float*>(&mat0) + 2);
@@ -674,15 +697,26 @@ void Rasterizer::rasterize(const Occluder& occluder)
 		__m256 Y2 = _mm256_fmadd_ps(Xf2, mat10, _mm256_fmadd_ps(Yf2, mat11, _mm256_fmadd_ps(Zf2, mat12, mat13)));
 		__m256 Y3 = _mm256_fmadd_ps(Xf3, mat10, _mm256_fmadd_ps(Yf3, mat11, _mm256_fmadd_ps(Zf3, mat12, mat13)));
 
+		__m256 mat30 = _mm256_broadcast_ss(reinterpret_cast<const float*>(&mat3) + 0);
+		__m256 mat31 = _mm256_broadcast_ss(reinterpret_cast<const float*>(&mat3) + 1);
+		__m256 mat32 = _mm256_broadcast_ss(reinterpret_cast<const float*>(&mat3) + 2);
+		__m256 mat33 = _mm256_broadcast_ss(reinterpret_cast<const float*>(&mat3) + 3);
+
+		__m256 W0 = _mm256_fmadd_ps(Xf0, mat30, _mm256_fmadd_ps(Yf0, mat31, _mm256_fmadd_ps(Zf0, mat32, mat33)));
+		__m256 W1 = _mm256_fmadd_ps(Xf1, mat30, _mm256_fmadd_ps(Yf1, mat31, _mm256_fmadd_ps(Zf1, mat32, mat33)));
+		__m256 W2 = _mm256_fmadd_ps(Xf2, mat30, _mm256_fmadd_ps(Yf2, mat31, _mm256_fmadd_ps(Zf2, mat32, mat33)));
+		__m256 W3 = _mm256_fmadd_ps(Xf3, mat30, _mm256_fmadd_ps(Yf3, mat31, _mm256_fmadd_ps(Zf3, mat32, mat33)));
+
 		__m256 invW0, invW1, invW2, invW3;
 		// Clamp W and invert
 		if (possiblyNearClipped)
 		{
-			__m256 clampW = _mm256_set1_ps(oneOverFloatMax);
-			invW0 = _mm256_xor_ps(_mm256_rcp_ps(_mm256_max_ps(_mm256_andnot_ps(minusZero256, W0), clampW)), wSign0);
-			invW1 = _mm256_xor_ps(_mm256_rcp_ps(_mm256_max_ps(_mm256_andnot_ps(minusZero256, W1), clampW)), wSign1);
-			invW2 = _mm256_xor_ps(_mm256_rcp_ps(_mm256_max_ps(_mm256_andnot_ps(minusZero256, W2), clampW)), wSign2);
-			invW3 = _mm256_xor_ps(_mm256_rcp_ps(_mm256_max_ps(_mm256_andnot_ps(minusZero256, W3), clampW)), wSign3);
+			__m256 lowerBound = _mm256_set1_ps(-maxInvW);
+			__m256 upperBound = _mm256_set1_ps(+maxInvW);
+			invW0 = _mm256_min_ps(upperBound, _mm256_max_ps(lowerBound, _mm256_rcp_ps(W0)));
+			invW1 = _mm256_min_ps(upperBound, _mm256_max_ps(lowerBound, _mm256_rcp_ps(W1)));
+			invW2 = _mm256_min_ps(upperBound, _mm256_max_ps(lowerBound, _mm256_rcp_ps(W2)));
+			invW3 = _mm256_min_ps(upperBound, _mm256_max_ps(lowerBound, _mm256_rcp_ps(W3)));
 		}
 		else
 		{
@@ -693,18 +727,17 @@ void Rasterizer::rasterize(const Occluder& occluder)
 		}
 
 		// Round to integer coordinates to improve culling of zero-area triangles
-		__m256 x0 = _mm256_fmsub_ps(_mm256_round_ps(_mm256_mul_ps(X0, invW0), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f), _mm256_set1_ps(0.5f));
-		__m256 x1 = _mm256_fmsub_ps(_mm256_round_ps(_mm256_mul_ps(X1, invW1), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f), _mm256_set1_ps(0.5f));
-		__m256 x2 = _mm256_fmsub_ps(_mm256_round_ps(_mm256_mul_ps(X2, invW2), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f), _mm256_set1_ps(0.5f));
-		__m256 x3 = _mm256_fmsub_ps(_mm256_round_ps(_mm256_mul_ps(X3, invW3), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f), _mm256_set1_ps(0.5f));
+		__m256 x0 = _mm256_mul_ps(_mm256_round_ps(_mm256_mul_ps(X0, invW0), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f));
+		__m256 x1 = _mm256_mul_ps(_mm256_round_ps(_mm256_mul_ps(X1, invW1), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f));
+		__m256 x2 = _mm256_mul_ps(_mm256_round_ps(_mm256_mul_ps(X2, invW2), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f));
+		__m256 x3 = _mm256_mul_ps(_mm256_round_ps(_mm256_mul_ps(X3, invW3), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f));
 
-		__m256 y0 = _mm256_fmsub_ps(_mm256_round_ps(_mm256_mul_ps(Y0, invW0), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f), _mm256_set1_ps(0.5f));
-		__m256 y1 = _mm256_fmsub_ps(_mm256_round_ps(_mm256_mul_ps(Y1, invW1), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f), _mm256_set1_ps(0.5f));
-		__m256 y2 = _mm256_fmsub_ps(_mm256_round_ps(_mm256_mul_ps(Y2, invW2), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f), _mm256_set1_ps(0.5f));
-		__m256 y3 = _mm256_fmsub_ps(_mm256_round_ps(_mm256_mul_ps(Y3, invW3), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f), _mm256_set1_ps(0.5f));
+		__m256 y0 = _mm256_mul_ps(_mm256_round_ps(_mm256_mul_ps(Y0, invW0), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f));
+		__m256 y1 = _mm256_mul_ps(_mm256_round_ps(_mm256_mul_ps(Y1, invW1), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f));
+		__m256 y2 = _mm256_mul_ps(_mm256_round_ps(_mm256_mul_ps(Y2, invW2), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f));
+		__m256 y3 = _mm256_mul_ps(_mm256_round_ps(_mm256_mul_ps(Y3, invW3), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), _mm256_set1_ps(0.125f));
 
-
-		// Compute unnormalized edge directions - 5th one splits quad into 2 triangles if non-convex
+		// Compute unnormalized edge directions
 		__m256 edgeNormalsX0 = _mm256_sub_ps(y1, y0);
 		__m256 edgeNormalsX1 = _mm256_sub_ps(y2, y1);
 		__m256 edgeNormalsX2 = _mm256_sub_ps(y3, y2);
@@ -715,35 +748,56 @@ void Rasterizer::rasterize(const Occluder& occluder)
 		__m256 edgeNormalsY2 = _mm256_sub_ps(x2, x3);
 		__m256 edgeNormalsY3 = _mm256_sub_ps(x3, x0);
 
-		__m256 area1 = _mm256_fmsub_ps(edgeNormalsX0, edgeNormalsY1, _mm256_mul_ps(edgeNormalsX1, edgeNormalsY0));
+		__m256 area0 = _mm256_fmsub_ps(edgeNormalsX0, edgeNormalsY1, _mm256_mul_ps(edgeNormalsX1, edgeNormalsY0));
+		__m256 area1 = _mm256_fmsub_ps(edgeNormalsX1, edgeNormalsY2, _mm256_mul_ps(edgeNormalsX2, edgeNormalsY1));
 		__m256 area2 = _mm256_fmsub_ps(edgeNormalsX2, edgeNormalsY3, _mm256_mul_ps(edgeNormalsX3, edgeNormalsY2));
+		__m256 area3 = _mm256_sub_ps(_mm256_add_ps(area0, area2), area1);
 
-		// Area and backface culling
-		__m256 areaCulled1 = _mm256_cmp_ps(area1, _mm256_setzero_ps(), _CMP_LE_OQ);
-		__m256 areaCulled2 = _mm256_cmp_ps(area2, _mm256_setzero_ps(), _CMP_LE_OQ);
+		__m256 minusZero256 = _mm256_set1_ps(-0.0f);
 
-		// Need to flip back face test for each W < 0
+		// Compute signs of areas. We treat 0 as negative as this allows treating primitives with zero area as backfacing.
+		__m256 areaSign0 = _mm256_and_ps(minusZero256, _mm256_cmp_ps(area0, _mm256_setzero_ps(), _CMP_LE_OQ));
+		__m256 areaSign1 = _mm256_and_ps(minusZero256, _mm256_cmp_ps(area1, _mm256_setzero_ps(), _CMP_LE_OQ));
+		__m256 areaSign2 = _mm256_and_ps(minusZero256, _mm256_cmp_ps(area2, _mm256_setzero_ps(), _CMP_LE_OQ));
+		__m256 areaSign3 = _mm256_and_ps(minusZero256, _mm256_cmp_ps(area3, _mm256_setzero_ps(), _CMP_LE_OQ));
+
+		__m256i config = _mm256_or_si256(
+			_mm256_or_si256(_mm256_srli_epi32(_mm256_castps_si256(areaSign3), 28), _mm256_srli_epi32(_mm256_castps_si256(areaSign2), 29)),
+			_mm256_or_si256(_mm256_srli_epi32(_mm256_castps_si256(areaSign1), 30), _mm256_srli_epi32(_mm256_castps_si256(areaSign0), 31)));
+
+		__m256 wSign0, wSign1, wSign2, wSign3;
 		if (possiblyNearClipped)
 		{
-			areaCulled1 = _mm256_xor_ps(_mm256_xor_ps(areaCulled1, W1), _mm256_xor_ps(W0, W2));
-			areaCulled2 = _mm256_xor_ps(_mm256_xor_ps(areaCulled2, W3), _mm256_xor_ps(W0, W2));
+			wSign0 = _mm256_and_ps(invW0, minusZero256);
+			wSign1 = _mm256_and_ps(invW1, minusZero256);
+			wSign2 = _mm256_and_ps(invW2, minusZero256);
+			wSign3 = _mm256_and_ps(invW3, minusZero256);
+
+			config = _mm256_or_si256(config,
+				_mm256_or_si256(
+					_mm256_or_si256(_mm256_srli_epi32(_mm256_castps_si256(wSign3), 24), _mm256_srli_epi32(_mm256_castps_si256(wSign2), 25)),
+					_mm256_or_si256(_mm256_srli_epi32(_mm256_castps_si256(wSign1), 26), _mm256_srli_epi32(_mm256_castps_si256(wSign0), 27))));
+		}
+		else
+		{
+			wSign0 = _mm256_setzero_ps();
+			wSign1 = _mm256_setzero_ps();
+			wSign2 = _mm256_setzero_ps();
+			wSign3 = _mm256_setzero_ps();
 		}
 
-		primitiveValid = _mm256_andnot_ps(_mm256_and_ps(areaCulled1, areaCulled2), primitiveValid);
-
-		if (_mm256_testz_ps(primitiveValid, primitiveValid))
+		__m256i modes = _mm256_i32gather_epi32(modeTable, config, 4);
+		if (_mm256_testz_si256(modes, modes))
 		{
 			continue;
 		}
 
-		__m256 area3 = _mm256_fmsub_ps(edgeNormalsX1, edgeNormalsY2, _mm256_mul_ps(edgeNormalsX2, edgeNormalsY1));
-		__m256 area4 = _mm256_fmsub_ps(edgeNormalsX3, edgeNormalsY0, _mm256_mul_ps(edgeNormalsX0, edgeNormalsY3));
+		__m256i primitiveValid = _mm256_cmpgt_epi32(modes, _mm256_setzero_si256());
 
-		// If all orientations are positive, the primitive must be convex
-		uint32_t nonConvexMask = _mm256_movemask_ps(_mm256_or_ps(_mm256_or_ps(area1, area2), _mm256_or_ps(area3, area4)));
+		uint32_t primModes[8];
+		_mm256_storeu_si256(reinterpret_cast<__m256i*>(primModes), modes);
 
 		__m256 minFx, minFy, maxFx, maxFy;
-		__m256i minX, minY, maxX, maxY;
 
 		if (possiblyNearClipped)
 		{
@@ -849,23 +903,24 @@ void Rasterizer::rasterize(const Occluder& occluder)
 		}
 
 		// Clamp and round
+		__m256i minX, minY, maxX, maxY;
 		minX = _mm256_max_epi32(_mm256_cvttps_epi32(_mm256_add_ps(minFx, _mm256_set1_ps(4.9999f / 8.0f))), _mm256_setzero_si256());
 		minY = _mm256_max_epi32(_mm256_cvttps_epi32(_mm256_add_ps(minFy, _mm256_set1_ps(4.9999f / 8.0f))), _mm256_setzero_si256());
-		maxX = _mm256_min_epi32(_mm256_cvttps_epi32(_mm256_add_ps(maxFx, _mm256_set1_ps(3.0f / 8.0f))), _mm256_set1_epi32(m_blocksX - 1));
-		maxY = _mm256_min_epi32(_mm256_cvttps_epi32(_mm256_add_ps(maxFy, _mm256_set1_ps(3.0f / 8.0f))), _mm256_set1_epi32(m_blocksY - 1));
+		maxX = _mm256_min_epi32(_mm256_cvttps_epi32(_mm256_add_ps(maxFx, _mm256_set1_ps(11.0f / 8.0f))), _mm256_set1_epi32(m_blocksX));
+		maxY = _mm256_min_epi32(_mm256_cvttps_epi32(_mm256_add_ps(maxFy, _mm256_set1_ps(11.0f / 8.0f))), _mm256_set1_epi32(m_blocksY));
 
 		// Check overlap between bounding box and frustum
-		__m256 outOfFrustum = _mm256_castsi256_ps(_mm256_or_si256(_mm256_cmpgt_epi32(minX, maxX), _mm256_cmpgt_epi32(minY, maxY)));
-		primitiveValid = _mm256_andnot_ps(outOfFrustum, primitiveValid);
+		__m256i inFrustum = _mm256_and_si256(_mm256_cmpgt_epi32(maxX, minX), _mm256_cmpgt_epi32(maxY, minY));
+		primitiveValid = _mm256_and_si256(inFrustum, primitiveValid);
 
-		if (_mm256_testz_ps(primitiveValid, primitiveValid))
+		if (_mm256_testz_si256(primitiveValid, primitiveValid))
 		{
 			continue;
 		}
 
 		// Convert bounds from [min, max] to [min, range]
-		__m256i rangeX = _mm256_add_epi32(_mm256_sub_epi32(maxX, minX), _mm256_set1_epi32(1));
-		__m256i rangeY = _mm256_add_epi32(_mm256_sub_epi32(maxY, minY), _mm256_set1_epi32(1));
+		__m256i rangeX = _mm256_sub_epi32(maxX, minX);
+		__m256i rangeY = _mm256_sub_epi32(maxY, minY);
 
 		// Compute Z from linear relation with 1/W
 		__m256 z0, z1, z2, z3;
@@ -886,57 +941,57 @@ void Rasterizer::rasterize(const Occluder& occluder)
 
 		__m128i packedDepthBounds = packDepthPremultiplied(maxZ);
 
-
-#if defined(SUPPORTS_PDEP)
-		packedDepthBounds = _mm_shuffle_epi8(packedDepthBounds, _mm_setr_epi8(0, 1, 8, 9, 2, 3, 10, 11, 4, 5, 12, 13, 6, 7, 14, 15));
-#endif
-
 		uint16_t depthBounds[8];
 		_mm_storeu_si128(reinterpret_cast<__m128i*>(depthBounds), packedDepthBounds);
 
 		// Compute screen space depth plane
-		__m256 greaterArea = _mm256_cmp_ps(_mm256_andnot_ps(minusZero256, area1), _mm256_andnot_ps(minusZero256, area2), _CMP_LT_OQ);
+		__m256 greaterArea = _mm256_cmp_ps(_mm256_andnot_ps(minusZero256, area0), _mm256_andnot_ps(minusZero256, area2), _CMP_LT_OQ);
 
 		__m256 invArea;
 		if (possiblyNearClipped)
 		{
 			// Do a precise divison to reduce error in depth plane. Note that the area computed here
 			// differs from the rasterized region if W < 0, so it can be very small for large covered screen regions.
-			invArea = _mm256_div_ps(_mm256_set1_ps(1.0f), _mm256_blendv_ps(area1, area2, greaterArea));
+			invArea = _mm256_div_ps(_mm256_set1_ps(1.0f), _mm256_blendv_ps(area0, area2, greaterArea));
 		}
 		else
 		{
-			invArea = _mm256_rcp_ps(_mm256_blendv_ps(area1, area2, greaterArea));
+			invArea = _mm256_rcp_ps(_mm256_blendv_ps(area0, area2, greaterArea));
 		}
 
 		__m256 z12 = _mm256_sub_ps(z1, z2);
 		__m256 z20 = _mm256_sub_ps(z2, z0);
 		__m256 z30 = _mm256_sub_ps(z3, z0);
 
-		// Depth at center of first pixel
-		__m256 refX = _mm256_sub_ps(_mm256_set1_ps(-0.5f + 1.0f / 16.0f), x0);
-		__m256 refY = _mm256_sub_ps(_mm256_set1_ps(-0.5f + 1.0f / 16.0f), y0);
-
-		__m256 depthPlane0, depthPlane1, depthPlane2;
 
 		__m256 edgeNormalsX4 = _mm256_sub_ps(y0, y2);
 		__m256 edgeNormalsY4 = _mm256_sub_ps(x2, x0);
 
+		__m256 depthPlane0, depthPlane1, depthPlane2;
 		depthPlane1 = _mm256_mul_ps(invArea, _mm256_blendv_ps(_mm256_fmsub_ps(z20, edgeNormalsX1, _mm256_mul_ps(z12, edgeNormalsX4)), _mm256_fnmadd_ps(z20, edgeNormalsX3, _mm256_mul_ps(z30, edgeNormalsX4)), greaterArea));
 		depthPlane2 = _mm256_mul_ps(invArea, _mm256_blendv_ps(_mm256_fmsub_ps(z20, edgeNormalsY1, _mm256_mul_ps(z12, edgeNormalsY4)), _mm256_fnmadd_ps(z20, edgeNormalsY3, _mm256_mul_ps(z30, edgeNormalsY4)), greaterArea));
 
-		depthPlane0 = _mm256_fmadd_ps(refX, depthPlane1, _mm256_fmadd_ps(refY, depthPlane2, z0));
-		depthPlane0 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(minY), depthPlane2, depthPlane0);
+		x0 = _mm256_sub_ps(x0, _mm256_cvtepi32_ps(minX));
+		y0 = _mm256_sub_ps(y0, _mm256_cvtepi32_ps(minY));
+
+		depthPlane0 = _mm256_fnmadd_ps(x0, depthPlane1, _mm256_fnmadd_ps(y0, depthPlane2, z0));
+
+		// If mode == Triangle0, replace edge 3 with edge 4; if mode == Triangle1, replace edge 0 with edge 4
+		__m256 modeTriangle0 = _mm256_castsi256_ps(_mm256_cmpeq_epi32(modes, _mm256_set1_epi32(Triangle0)));
+		__m256 modeTriangle1 = _mm256_castsi256_ps(_mm256_cmpeq_epi32(modes, _mm256_set1_epi32(Triangle1)));
+		edgeNormalsX3 = _mm256_blendv_ps(edgeNormalsX3, edgeNormalsX4, modeTriangle0);
+		edgeNormalsY3 = _mm256_blendv_ps(edgeNormalsY3, edgeNormalsY4, modeTriangle0);
+		edgeNormalsX0 = _mm256_blendv_ps(edgeNormalsX0, edgeNormalsX4, modeTriangle1);
+		edgeNormalsY0 = _mm256_blendv_ps(edgeNormalsY0, edgeNormalsY4, modeTriangle1);
 
 		// Flip edges if W < 0
-		__m256 edgeFlipMask0, edgeFlipMask1, edgeFlipMask2, edgeFlipMask3, edgeFlipMask4;
+		__m256 edgeFlipMask0, edgeFlipMask1, edgeFlipMask2, edgeFlipMask3;
 		if (possiblyNearClipped)
 		{
-			edgeFlipMask0 = _mm256_xor_ps(wSign0, wSign1);
+			edgeFlipMask0 = _mm256_xor_ps(wSign0, _mm256_blendv_ps(wSign1, wSign2, modeTriangle1));
 			edgeFlipMask1 = _mm256_xor_ps(wSign1, wSign2);
 			edgeFlipMask2 = _mm256_xor_ps(wSign2, wSign3);
-			edgeFlipMask3 = _mm256_xor_ps(wSign3, wSign0);
-			edgeFlipMask4 = _mm256_xor_ps(wSign0, wSign2);
+			edgeFlipMask3 = _mm256_xor_ps(wSign0, _mm256_blendv_ps(wSign3, wSign2, modeTriangle0));
 		}
 		else
 		{
@@ -944,47 +999,50 @@ void Rasterizer::rasterize(const Occluder& occluder)
 			edgeFlipMask1 = _mm256_setzero_ps();
 			edgeFlipMask2 = _mm256_setzero_ps();
 			edgeFlipMask3 = _mm256_setzero_ps();
-			edgeFlipMask4 = _mm256_setzero_ps();
 		}
 
-		__m256 invLen0, invLen1, invLen2, invLen3, invLen4;
-
 		// Normalize edge equations for lookup
-		normalizeEdge<possiblyNearClipped>(edgeNormalsX0, edgeNormalsY0, invLen0, edgeFlipMask0);
-		normalizeEdge<possiblyNearClipped>(edgeNormalsX1, edgeNormalsY1, invLen1, edgeFlipMask1);
-		normalizeEdge<possiblyNearClipped>(edgeNormalsX2, edgeNormalsY2, invLen2, edgeFlipMask2);
-		normalizeEdge<possiblyNearClipped>(edgeNormalsX3, edgeNormalsY3, invLen3, edgeFlipMask3);
-		normalizeEdge<possiblyNearClipped>(edgeNormalsX4, edgeNormalsY4, invLen4, edgeFlipMask4);
+		normalizeEdge<possiblyNearClipped>(edgeNormalsX0, edgeNormalsY0, edgeFlipMask0);
+		normalizeEdge<possiblyNearClipped>(edgeNormalsX1, edgeNormalsY1, edgeFlipMask1);
+		normalizeEdge<possiblyNearClipped>(edgeNormalsX2, edgeNormalsY2, edgeFlipMask2);
+		normalizeEdge<possiblyNearClipped>(edgeNormalsX3, edgeNormalsY3, edgeFlipMask3);
 
 		const float maxOffset = -minEdgeOffset;
 		__m256 add256 = _mm256_set1_ps(0.5f - minEdgeOffset * (OFFSET_QUANTIZATION_FACTOR - 1) / (maxOffset - minEdgeOffset));
-		__m256 edgeOffsets0, edgeOffsets1, edgeOffsets2, edgeOffsets3, edgeOffsets4;
-		edgeOffsets0 = _mm256_fmadd_ps(_mm256_fmsub_ps(x1, y0, _mm256_mul_ps(y1, x0)), invLen0, add256);
-		edgeOffsets1 = _mm256_fmadd_ps(_mm256_fmsub_ps(x2, y1, _mm256_mul_ps(y2, x1)), invLen1, add256);
-		edgeOffsets2 = _mm256_fmadd_ps(_mm256_fmsub_ps(x3, y2, _mm256_mul_ps(y3, x2)), invLen2, add256);
-		edgeOffsets3 = _mm256_fmadd_ps(_mm256_fmsub_ps(x0, y3, _mm256_mul_ps(y0, x3)), invLen3, add256);
-		edgeOffsets4 = _mm256_fmadd_ps(_mm256_fmsub_ps(x0, y2, _mm256_mul_ps(y0, x2)), invLen4, add256);
+		__m256 edgeOffsets0, edgeOffsets1, edgeOffsets2, edgeOffsets3;
 
-		edgeOffsets0 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(minY), edgeNormalsY0, edgeOffsets0);
+		edgeOffsets0 = _mm256_fnmadd_ps(x0, edgeNormalsX0, _mm256_fnmadd_ps(y0, edgeNormalsY0, add256));
+		edgeOffsets1 = _mm256_fnmadd_ps(x1, edgeNormalsX1, _mm256_fnmadd_ps(y1, edgeNormalsY1, add256));
+		edgeOffsets2 = _mm256_fnmadd_ps(x2, edgeNormalsX2, _mm256_fnmadd_ps(y2, edgeNormalsY2, add256));
+		edgeOffsets3 = _mm256_fnmadd_ps(x3, edgeNormalsX3, _mm256_fnmadd_ps(y3, edgeNormalsY3, add256));
+
+		edgeOffsets1 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(minX), edgeNormalsX1, edgeOffsets1);
+		edgeOffsets2 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(minX), edgeNormalsX2, edgeOffsets2);
+		edgeOffsets3 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(minX), edgeNormalsX3, edgeOffsets3);
+
 		edgeOffsets1 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(minY), edgeNormalsY1, edgeOffsets1);
 		edgeOffsets2 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(minY), edgeNormalsY2, edgeOffsets2);
 		edgeOffsets3 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(minY), edgeNormalsY3, edgeOffsets3);
-		edgeOffsets4 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(minY), edgeNormalsY4, edgeOffsets4);
 
 		// Quantize slopes
-		__m256i slopeLookups0, slopeLookups1, slopeLookups2, slopeLookups3, slopeLookups4;
+		__m256i slopeLookups0, slopeLookups1, slopeLookups2, slopeLookups3;
 		slopeLookups0 = quantizeSlopeLookup(edgeNormalsX0, edgeNormalsY0);
 		slopeLookups1 = quantizeSlopeLookup(edgeNormalsX1, edgeNormalsY1);
 		slopeLookups2 = quantizeSlopeLookup(edgeNormalsX2, edgeNormalsY2);
 		slopeLookups3 = quantizeSlopeLookup(edgeNormalsX3, edgeNormalsY3);
-		slopeLookups4 = quantizeSlopeLookup(edgeNormalsX4, edgeNormalsY4);
 
-		__m128 half = _mm_set1_ps(0.5f);
+		__m256i firstBlockIdx = _mm256_add_epi32(_mm256_mullo_epi16(minY, _mm256_set1_epi32(m_blocksX)), minX);
+
+		uint32_t firstBlocks[8];
+		_mm256_storeu_si256(reinterpret_cast<__m256i*>(firstBlocks), firstBlockIdx);
+
+		uint32_t rangesX[8];
+		_mm256_storeu_si256(reinterpret_cast<__m256i*>(rangesX), rangeX);
+
+		uint32_t rangesY[8];
+		_mm256_storeu_si256(reinterpret_cast<__m256i*>(rangesY), rangeY);
 
 		// Transpose into AoS
-		__m128i bounds[8];
-		transpose256i(minX, rangeX, minY, rangeY, bounds);
-
 		__m128 depthPlane[8];
 		transpose256(depthPlane0, depthPlane1, depthPlane2, _mm256_setzero_ps(), depthPlane);
 
@@ -1000,119 +1058,157 @@ void Rasterizer::rasterize(const Occluder& occluder)
 		__m128i slopeLookups[8];
 		transpose256i(slopeLookups0, slopeLookups1, slopeLookups2, slopeLookups3, slopeLookups);
 
-		// Only needed for non-convex quads
-		__m128 extraEdgeData[8];
-		transpose256(edgeOffsets4, edgeNormalsX4, edgeNormalsY4, _mm256_castsi256_ps(slopeLookups4), extraEdgeData);
+		uint32_t validMask = _mm256_movemask_ps(_mm256_castsi256_ps(primitiveValid));
 
 		// Fetch data pointers since we'll manually strength-reduce memory arithmetic
 		const int64_t* pTable = &*m_precomputedRasterTables.begin();
 		uint16_t* pHiZBuffer = &*m_hiZ.begin();
 		__m128i* pDepthBuffer = &*m_depthBuffer.begin();
 
-		uint32_t validMask = _mm256_movemask_ps(primitiveValid);
-
-#if defined(SUPPORTS_PDEP)
-		validMask = _pdep_u32(validMask, 0x55) | _pdep_u32(validMask >> 4, 0xAA);
-		nonConvexMask = _pdep_u32(nonConvexMask, 0x55) | _pdep_u32(nonConvexMask >> 4, 0xAA);
-#endif
-
-		int primitiveIdx = -1;
-
 		// Loop over set bits
-		unsigned long zeroes;
-		while (_BitScanForward(&zeroes, validMask))
+		unsigned long primitiveIdx;
+		while (_BitScanForward(&primitiveIdx, validMask))
 		{
-			// Move index and mask to next set bit
-			primitiveIdx += zeroes + 1;
-			validMask >>= zeroes + 1;
+			// Clear lowest set bit in mask
+			validMask &= validMask - 1;
 
-			const uint32_t blockMinX = _mm_cvtsi128_si32(bounds[primitiveIdx]);
-			const uint32_t blockRangeX = _mm_extract_epi32(bounds[primitiveIdx], 1);
-			const uint32_t blockMinY = _mm_extract_epi32(bounds[primitiveIdx], 2);
-			const uint32_t blockRangeY = _mm_extract_epi32(bounds[primitiveIdx], 3);
-
-			bool convex = (nonConvexMask & (1 << primitiveIdx)) == 0;
+			uint32_t primitiveIdxTransposed = ((primitiveIdx << 1) & 7) | (primitiveIdx >> 2);
 
 			// Extract and prepare per-primitive data
 			uint16_t primitiveMaxZ = depthBounds[primitiveIdx];
-			__m128i primitiveMaxZV = _mm_set1_epi16(primitiveMaxZ);
 
-			__m256 depthDx = _mm256_broadcastss_ps(_mm_permute_ps(depthPlane[primitiveIdx], _MM_SHUFFLE(1, 1, 1, 1)));
-			__m256 depthDy = _mm256_broadcastss_ps(_mm_permute_ps(depthPlane[primitiveIdx], _MM_SHUFFLE(2, 2, 2, 2)));
+			__m256 depthDx = _mm256_broadcastss_ps(_mm_permute_ps(depthPlane[primitiveIdxTransposed], _MM_SHUFFLE(1, 1, 1, 1)));
+			__m256 depthDy = _mm256_broadcastss_ps(_mm_permute_ps(depthPlane[primitiveIdxTransposed], _MM_SHUFFLE(2, 2, 2, 2)));
 
-			__m256i slopeLookup = _mm256_set_m128i(_mm_castps_si128(_mm_permute_ps(extraEdgeData[primitiveIdx], _MM_SHUFFLE(3, 3, 3, 3))), slopeLookups[primitiveIdx]);
-
+			const float depthSamplePos = -0.5f + 1.0f / 16.0f;
 			__m256 lineDepth =
-				_mm256_fmadd_ps(depthDx, _mm256_setr_ps(0.0f, 0.125f, 0.25f, 0.375f, 0.0f, 0.125f, 0.25f, 0.375f),
-					_mm256_fmadd_ps(depthDy, _mm256_setr_ps(0.0f, 0.0f, 0.0f, 0.0f, 0.125f, 0.125f, 0.125f, 0.125f), _mm256_broadcastss_ps(depthPlane[primitiveIdx])));
+				_mm256_fmadd_ps(depthDx, _mm256_setr_ps(depthSamplePos + 0.0f, depthSamplePos + 0.125f, depthSamplePos + 0.25f, depthSamplePos + 0.375f, depthSamplePos + 0.0f, depthSamplePos + 0.125f, depthSamplePos + 0.25f, depthSamplePos + 0.375f),
+					_mm256_fmadd_ps(depthDy, _mm256_setr_ps(depthSamplePos + 0.0f, depthSamplePos + 0.0f, depthSamplePos + 0.0f, depthSamplePos + 0.0f, depthSamplePos + 0.125f, depthSamplePos + 0.125f, depthSamplePos + 0.125f, depthSamplePos + 0.125f),
+						_mm256_broadcastss_ps(depthPlane[primitiveIdxTransposed])));
 
-			__m256 edgeNormalX = _mm256_set_m128(_mm_permute_ps(extraEdgeData[primitiveIdx], _MM_SHUFFLE(1, 1, 1, 1)), edgeNormalsX[primitiveIdx]);
-			__m256 edgeNormalY = _mm256_set_m128(_mm_permute_ps(extraEdgeData[primitiveIdx], _MM_SHUFFLE(2, 2, 2, 2)), edgeNormalsY[primitiveIdx]);
-			__m256 lineOffset = _mm256_set_m128(_mm_broadcastss_ps(extraEdgeData[primitiveIdx]), edgeOffsets[primitiveIdx]);
-
-			__m256 one = _mm256_set1_ps(1.0f);
+			__m128i slopeLookup = slopeLookups[primitiveIdxTransposed];
+			__m128 edgeNormalX = edgeNormalsX[primitiveIdxTransposed];
+			__m128 edgeNormalY = edgeNormalsY[primitiveIdxTransposed];
+			__m128 lineOffset = edgeOffsets[primitiveIdxTransposed];
 
 			const uint32_t blocksX = m_blocksX;
 
-			uint16_t* pBlockRowHiZ = pHiZBuffer + blocksX * blockMinY + blockMinX;
-			__m256i* out = reinterpret_cast<__m256i*>(pDepthBuffer) + 4 * (blockMinY * blocksX + blockMinX);
+			const uint32_t firstBlock = firstBlocks[primitiveIdx];
+			const uint32_t blockRangeX = rangesX[primitiveIdx];
+			const uint32_t blockRangeY = rangesY[primitiveIdx];
 
-			for (uint32_t blockY = 0; blockY < blockRangeY; ++blockY, pBlockRowHiZ += (blocksX - blockRangeX), out += 4 * (blocksX - blockRangeX), lineDepth = _mm256_add_ps(lineDepth, depthDy), lineOffset = _mm256_add_ps(lineOffset, edgeNormalY))
+			uint16_t* pPrimitiveHiZ = pHiZBuffer + firstBlock;
+			__m256i* pPrimitiveOut = reinterpret_cast<__m256i*>(pDepthBuffer) + 4 * firstBlock;
+
+			uint32_t primitiveMode = primModes[primitiveIdx];
+
+			for (uint32_t blockY = 0;
+				blockY < blockRangeY;
+				++blockY,
+				pPrimitiveHiZ += blocksX,
+				pPrimitiveOut += 4 * blocksX,
+				lineDepth = _mm256_add_ps(lineDepth, depthDy),
+				lineOffset = _mm_add_ps(lineOffset, edgeNormalY))
 			{
-				int32_t rowRangeX = blockRangeX;
+				uint16_t* pBlockRowHiZ = pPrimitiveHiZ;
+				__m256i* out = pPrimitiveOut;
 
-				for (uint32_t multiBlockX = 0; multiBlockX <= (blockRangeX + 7) / 8 - 1; ++multiBlockX, rowRangeX -= 8)
+				__m128 offset = lineOffset;
+				__m256 depth = lineDepth;
+
+				bool anyBlockHit = false;
+				for (uint32_t blockX = 0;
+					blockX < blockRangeX;
+					++blockX,
+					pBlockRowHiZ += 1,
+					out += 4,
+					depth = _mm256_add_ps(depthDx, depth),
+					offset = _mm_add_ps(edgeNormalX, offset))
 				{
-					uint32_t blockSize = std::min(8, rowRangeX);
-
-					// Load HiZ for 8 blocks at once - note we're possibly reading out-of-bounds here; but it doesn't affect correctness if we test more blocks than actually covered
-					__m128i hiZblob = _mm_loadu_si128(reinterpret_cast<const __m128i*>(pBlockRowHiZ));
-					uint32_t hiZPassMask = 0xFFFF ^ _mm_movemask_epi8(_mm_cmpeq_epi16(_mm_min_epu16(hiZblob, primitiveMaxZV), primitiveMaxZV));
-
-					hiZPassMask &= (0xFFFF >> (8 - blockSize));
-
-					// Skip 8 blocks if all Hi-Z culled
-					if (hiZPassMask == 0)
+					uint16_t hiZ = *pBlockRowHiZ;
+					if (hiZ >= primitiveMaxZ)
 					{
-						pBlockRowHiZ += blockSize;
-						out += 4 * blockSize;
 						continue;
 					}
 
-					__m256 blockXf = _mm256_broadcastss_ps(_mm_cvt_si2ss(_mm_setzero_ps(), multiBlockX * 8 + blockMinX));
-
-					__m256 offset = _mm256_fmadd_ps(edgeNormalX, blockXf, lineOffset);
-					__m256 depth = _mm256_fmadd_ps(depthDx, blockXf, lineDepth);
-
-					for (uint32_t blockX = 0; blockX < blockSize; ++blockX, out += 4, hiZPassMask >>= 2, depth = _mm256_add_ps(depthDx, depth), offset = _mm256_add_ps(edgeNormalX, offset), pBlockRowHiZ++)
+					uint64_t blockMask;
+					if (primitiveMode == Convex)	// 83-97%
 					{
-						// Hi-Z test
-						if ((hiZPassMask & 1) == 0)
+						// Simplified conservative test: combined block mask will be zero if any offset is outside of range
+						__m128 anyOffsetOutsideMask = _mm_cmpge_ps(offset, _mm_set1_ps(OFFSET_QUANTIZATION_FACTOR - 1));
+						if (!_mm_testz_ps(anyOffsetOutsideMask, anyOffsetOutsideMask))
 						{
+							if (anyBlockHit)
+							{
+								// Convexity implies we won't hit another block in this row and can skip to the next line.
+								break;
+							}
 							continue;
 						}
 
-						__m256i lookup = _mm256_or_si256(slopeLookup, _mm256_min_epi32(_mm256_max_epi32(_mm256_cvttps_epi32(offset), _mm256_setzero_si256()), _mm256_set1_epi32(OFFSET_QUANTIZATION_FACTOR - 1)));
+						anyBlockHit = true;
+
+						__m128i offsetClamped = _mm_max_epi32(_mm_cvttps_epi32(offset), _mm_setzero_si128());
+
+						static uint64_t totalBlocks = 0;
+						static uint64_t containedBlocks = 0;
+
+						__m128i lookup = _mm_or_si128(slopeLookup, offsetClamped);
 
 						// Generate block mask
-						uint64_t t0 = pTable[uint32_t(_mm_cvtsi128_si32(_mm256_castsi256_si128(lookup)))];
-						uint64_t t1 = pTable[uint32_t(_mm_extract_epi32(_mm256_castsi256_si128(lookup), 1))];
-						uint64_t t2 = pTable[uint32_t(_mm_extract_epi32(_mm256_castsi256_si128(lookup), 2))];
-						uint64_t t3 = pTable[uint32_t(_mm_extract_epi32(_mm256_castsi256_si128(lookup), 3))];
+						uint64_t A = pTable[uint32_t(_mm_cvtsi128_si32(lookup))];
+						uint64_t B = pTable[uint32_t(_mm_extract_epi32(lookup, 1))];
+						uint64_t C = pTable[uint32_t(_mm_extract_epi32(lookup, 2))];
+						uint64_t D = pTable[uint32_t(_mm_extract_epi32(lookup, 3))];
 
-						t0 &= t1;
-						t2 &= t3;
+						blockMask = (A & B) & (C & D);
 
-						uint64_t blockMask;
+						// It is possible but very unlikely that blockMask == 0 if all A,B,C,D != 0 according to the conservative test above, so we skip the additional branch here.
+					}
+					else
+					{
+						__m128i offsetClamped = _mm_min_epi32(_mm_max_epi32(_mm_cvttps_epi32(offset), _mm_setzero_si128()), _mm_set1_epi32(OFFSET_QUANTIZATION_FACTOR - 1));
+						__m128i lookup = _mm_or_si128(slopeLookup, offsetClamped);
 
-						if (convex)
+						// Generate block mask
+						uint64_t A = pTable[uint32_t(_mm_cvtsi128_si32(lookup))];
+						uint64_t B = pTable[uint32_t(_mm_extract_epi32(lookup, 1))];
+						uint64_t C = pTable[uint32_t(_mm_extract_epi32(lookup, 2))];
+						uint64_t D = pTable[uint32_t(_mm_extract_epi32(lookup, 3))];
+
+						// Switch over primitive mode. MSVC compiles this as a "sub eax, 1; jz label;" ladder, so the mode enum is ordered by descending frequency of occurence
+						// to optimize branch efficiency. By ensuring we have a default case that falls through to the last possible value (ConcaveLeft if not near clipped,
+						// ConcaveCenter otherwise) we avoid the last branch in the ladder.
+						switch (primitiveMode)
 						{
-							blockMask = t0 & t2;
-						}
-						else
-						{
-							uint64_t t4 = pTable[uint32_t(_mm_cvtsi128_si32(_mm256_extracti128_si256(lookup, 1)))];
-							blockMask = (t0 & t4) | (t2 & ~t4);
+						case Triangle0:				// 2.3-11%
+							blockMask = A & B & D;
+							break;
+
+						case Triangle1:				// 0.1-4%
+							blockMask = C & D & ~A;
+							break;
+
+						case ConcaveRight:			// 0.01-0.9%
+							blockMask = (A | D) & (B & C);
+							break;
+
+						default:
+							// Case ConcaveCenter can only occur if any W < 0
+							if (possiblyNearClipped)
+							{
+								// case ConcaveCenter:			// < 1e-6%
+								blockMask = (A & B) | (C & D);
+								break;
+							}
+							else
+							{
+								// Fall-through
+							}
+
+						case ConcaveLeft:			// 0.01-0.6%
+							blockMask = (A & D) & (B | C);
+							break;
 						}
 
 						// No pixels covered => skip block
@@ -1120,60 +1216,58 @@ void Rasterizer::rasterize(const Occluder& occluder)
 						{
 							continue;
 						}
-
-						// Load previous depth
-						__m256i s0 = _mm256_load_si256(out + 0);
-						__m256i s1 = _mm256_load_si256(out + 1);
-						__m256i s2 = _mm256_load_si256(out + 2);
-						__m256i s3 = _mm256_load_si256(out + 3);
-
-						// Generate depth values around block
-						__m256 depth0 = depth;
-						__m256 depth1 = _mm256_fmadd_ps(depthDx, _mm256_set1_ps(0.5f), depth0);
-						__m256 depth8 = _mm256_add_ps(depthDy, depth0);
-						__m256 depth9 = _mm256_add_ps(depthDy, depth1);
-
-						// Pack depth
-						__m256i d0 = packDepthPremultiplied(depth0, depth1);
-						__m256i d4 = packDepthPremultiplied(depth8, depth9);
-
-						// Interpolate remaining values in packed space
-						__m256i d2 = _mm256_avg_epu16(d0, d4);
-						__m256i d1 = _mm256_avg_epu16(d0, d2);
-						__m256i d3 = _mm256_avg_epu16(d2, d4);
-
-						// Not all pixels covered - mask depth 
-						if (blockMask != -1)
-						{
-							__m128i A = _mm_cvtsi64x_si128(blockMask);
-							__m128i B = _mm_slli_epi64(A, 4);
-							__m256i C = _mm256_inserti128_si256(_mm256_castsi128_si256(A), B, 1);
-							__m256i rowMask = _mm256_unpacklo_epi8(C, C);
-
-							d0 = _mm256_blendv_epi8(_mm256_setzero_si256(), d0, _mm256_slli_epi16(rowMask, 3));
-							d1 = _mm256_blendv_epi8(_mm256_setzero_si256(), d1, _mm256_slli_epi16(rowMask, 2));
-							d2 = _mm256_blendv_epi8(_mm256_setzero_si256(), d2, _mm256_add_epi16(rowMask, rowMask));
-							d3 = _mm256_blendv_epi8(_mm256_setzero_si256(), d3, rowMask);
-						}
-
-						// Merge depth values
-						__m256i n0 = _mm256_max_epu16(s0, d0);
-						__m256i n1 = _mm256_max_epu16(s1, d1);
-						__m256i n2 = _mm256_max_epu16(s2, d2);
-						__m256i n3 = _mm256_max_epu16(s3, d3);
-
-						// Store back new depth
-						_mm256_store_si256(out + 0, n0);
-						_mm256_store_si256(out + 1, n1);
-						_mm256_store_si256(out + 2, n2);
-						_mm256_store_si256(out + 3, n3);
-
-						// Update HiZ
-						__m256i newMinZ = _mm256_min_epu16(_mm256_min_epu16(n0, n1), _mm256_min_epu16(n2, n3));
-						__m128i newMinZ16 = _mm_minpos_epu16(_mm_min_epu16(_mm256_castsi256_si128(newMinZ), _mm256_extracti128_si256(newMinZ, 1)));
-
-						*pBlockRowHiZ = 0xFFFF & uint32_t(_mm_cvtsi128_si32(newMinZ16));
 					}
+
+					// Generate depth values around block
+					__m256 depth0 = depth;
+					__m256 depth1 = _mm256_fmadd_ps(depthDx, _mm256_set1_ps(0.5f), depth0);
+					__m256 depth8 = _mm256_add_ps(depthDy, depth0);
+					__m256 depth9 = _mm256_add_ps(depthDy, depth1);
+
+					// Pack depth
+					__m256i d0 = packDepthPremultiplied(depth0, depth1);
+					__m256i d4 = packDepthPremultiplied(depth8, depth9);
+
+					// Interpolate remaining values in packed space
+					__m256i d2 = _mm256_avg_epu16(d0, d4);
+					__m256i d1 = _mm256_avg_epu16(d0, d2);
+					__m256i d3 = _mm256_avg_epu16(d2, d4);
+
+					// Not all pixels covered - mask depth 
+					if (blockMask != -1)
+					{
+						__m128i A = _mm_cvtsi64x_si128(blockMask);
+						__m128i B = _mm_slli_epi64(A, 4);
+						__m256i C = _mm256_inserti128_si256(_mm256_castsi128_si256(A), B, 1);
+						__m256i rowMask = _mm256_unpacklo_epi8(C, C);
+
+						d0 = _mm256_blendv_epi8(_mm256_setzero_si256(), d0, _mm256_slli_epi16(rowMask, 3));
+						d1 = _mm256_blendv_epi8(_mm256_setzero_si256(), d1, _mm256_slli_epi16(rowMask, 2));
+						d2 = _mm256_blendv_epi8(_mm256_setzero_si256(), d2, _mm256_add_epi16(rowMask, rowMask));
+						d3 = _mm256_blendv_epi8(_mm256_setzero_si256(), d3, rowMask);
+					}
+
+					// Test fast clear flag
+					if (hiZ != 1)
+					{
+						// Merge depth values
+						d0 = _mm256_max_epu16(_mm256_load_si256(out + 0), d0);
+						d1 = _mm256_max_epu16(_mm256_load_si256(out + 1), d1);
+						d2 = _mm256_max_epu16(_mm256_load_si256(out + 2), d2);
+						d3 = _mm256_max_epu16(_mm256_load_si256(out + 3), d3);
+					}
+
+					// Store back new depth
+					_mm256_store_si256(out + 0, d0);
+					_mm256_store_si256(out + 1, d1);
+					_mm256_store_si256(out + 2, d2);
+					_mm256_store_si256(out + 3, d3);
+
+					// Update HiZ
+					__m256i newMinZ = _mm256_min_epu16(_mm256_min_epu16(d0, d1), _mm256_min_epu16(d2, d3));
+					__m128i newMinZ16 = _mm_minpos_epu16(_mm_min_epu16(_mm256_castsi256_si128(newMinZ), _mm256_extracti128_si256(newMinZ, 1)));
+
+					*pBlockRowHiZ = uint16_t(uint32_t(_mm_cvtsi128_si32(newMinZ16)));
 				}
 			}
 		}
