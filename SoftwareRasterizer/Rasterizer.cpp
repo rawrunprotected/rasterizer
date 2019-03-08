@@ -756,7 +756,7 @@ void Rasterizer::rasterize(const Occluder& occluder)
 		__m256 minusZero256 = _mm256_set1_ps(-0.0f);
 
 		// Compute signs of areas. We treat 0 as negative as this allows treating primitives with zero area as backfacing.
-		__m256 areaSign0 = _mm256_and_ps(minusZero256, _mm256_cmp_ps(area0, _mm256_setzero_ps(), _CMP_LE_OQ));
+		__m256 areaSign0 = _mm256_cmp_ps(area0, _mm256_setzero_ps(), _CMP_LE_OQ);
 		__m256 areaSign1 = _mm256_and_ps(minusZero256, _mm256_cmp_ps(area1, _mm256_setzero_ps(), _CMP_LE_OQ));
 		__m256 areaSign2 = _mm256_and_ps(minusZero256, _mm256_cmp_ps(area2, _mm256_setzero_ps(), _CMP_LE_OQ));
 		__m256 areaSign3 = _mm256_and_ps(minusZero256, _mm256_cmp_ps(area3, _mm256_setzero_ps(), _CMP_LE_OQ));
@@ -947,6 +947,12 @@ void Rasterizer::rasterize(const Occluder& occluder)
 		// Compute screen space depth plane
 		__m256 greaterArea = _mm256_cmp_ps(_mm256_andnot_ps(minusZero256, area0), _mm256_andnot_ps(minusZero256, area2), _CMP_LT_OQ);
 
+    // Force triangle area to be picked in the relevant mode.
+    __m256 modeTriangle0 = _mm256_castsi256_ps(_mm256_cmpeq_epi32(modes, _mm256_set1_epi32(Triangle0)));
+    __m256 modeTriangle1 = _mm256_castsi256_ps(_mm256_cmpeq_epi32(modes, _mm256_set1_epi32(Triangle1)));
+    greaterArea = _mm256_andnot_ps(modeTriangle0, _mm256_or_ps(modeTriangle1, greaterArea));
+
+
 		__m256 invArea;
 		if (possiblyNearClipped)
 		{
@@ -976,13 +982,11 @@ void Rasterizer::rasterize(const Occluder& occluder)
 
 		depthPlane0 = _mm256_fnmadd_ps(x0, depthPlane1, _mm256_fnmadd_ps(y0, depthPlane2, z0));
 
-		// If mode == Triangle0, replace edge 3 with edge 4; if mode == Triangle1, replace edge 0 with edge 4
-		__m256 modeTriangle0 = _mm256_castsi256_ps(_mm256_cmpeq_epi32(modes, _mm256_set1_epi32(Triangle0)));
-		__m256 modeTriangle1 = _mm256_castsi256_ps(_mm256_cmpeq_epi32(modes, _mm256_set1_epi32(Triangle1)));
-		edgeNormalsX3 = _mm256_blendv_ps(edgeNormalsX3, edgeNormalsX4, modeTriangle0);
-		edgeNormalsY3 = _mm256_blendv_ps(edgeNormalsY3, edgeNormalsY4, modeTriangle0);
-		edgeNormalsX0 = _mm256_blendv_ps(edgeNormalsX0, edgeNormalsX4, modeTriangle1);
-		edgeNormalsY0 = _mm256_blendv_ps(edgeNormalsY0, edgeNormalsY4, modeTriangle1);
+		// If mode == Triangle0, replace edge 2 with edge 4; if mode == Triangle1, replace edge 0 with edge 4
+		edgeNormalsX2 = _mm256_blendv_ps(edgeNormalsX2, edgeNormalsX4, modeTriangle0);
+		edgeNormalsY2 = _mm256_blendv_ps(edgeNormalsY2, edgeNormalsY4, modeTriangle0);
+		edgeNormalsX0 = _mm256_blendv_ps(edgeNormalsX0, _mm256_xor_ps(minusZero256, edgeNormalsX4), modeTriangle1);
+		edgeNormalsY0 = _mm256_blendv_ps(edgeNormalsY0, _mm256_xor_ps(minusZero256, edgeNormalsY4), modeTriangle1);
 
 		// Flip edges if W < 0
 		__m256 edgeFlipMask0, edgeFlipMask1, edgeFlipMask2, edgeFlipMask3;
@@ -990,8 +994,8 @@ void Rasterizer::rasterize(const Occluder& occluder)
 		{
 			edgeFlipMask0 = _mm256_xor_ps(wSign0, _mm256_blendv_ps(wSign1, wSign2, modeTriangle1));
 			edgeFlipMask1 = _mm256_xor_ps(wSign1, wSign2);
-			edgeFlipMask2 = _mm256_xor_ps(wSign2, wSign3);
-			edgeFlipMask3 = _mm256_xor_ps(wSign0, _mm256_blendv_ps(wSign3, wSign2, modeTriangle0));
+			edgeFlipMask2 = _mm256_xor_ps(wSign2, _mm256_blendv_ps(wSign3, wSign0, modeTriangle0));
+			edgeFlipMask3 = _mm256_xor_ps(wSign3, wSign0);
 		}
 		else
 		{
@@ -1182,11 +1186,11 @@ void Rasterizer::rasterize(const Occluder& occluder)
 						switch (primitiveMode)
 						{
 						case Triangle0:				// 2.3-11%
-							blockMask = A & B & D;
+							blockMask = A & B & C;
 							break;
 
 						case Triangle1:				// 0.1-4%
-							blockMask = C & D & ~A;
+							blockMask = A & C & D;
 							break;
 
 						case ConcaveRight:			// 0.01-0.9%
@@ -1234,7 +1238,7 @@ void Rasterizer::rasterize(const Occluder& occluder)
 					__m256i d3 = _mm256_avg_epu16(d2, d4);
 
 					// Not all pixels covered - mask depth 
-					if (blockMask != -1)
+				  if (blockMask != -1)
 					{
 						__m128i A = _mm_cvtsi64x_si128(blockMask);
 						__m128i B = _mm_slli_epi64(A, 4);
