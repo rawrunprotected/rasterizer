@@ -4,7 +4,7 @@ This project is a state-of-the-art software occlusion culling system.
 
 It's similar in spirit to Intel's https://github.com/GameTechDev/OcclusionCulling, but uses completely different techniques and is 2-3 times faster in single-threaded AVX mode when rendering the full set of occluders (no minimum size).
 
-Checkout http://threadlocalmutex.com/?p=144 for some implementation details.
+Checkout http://threadlocalmutex.com/?p=144 and http://threadlocalmutex.com/?p=163 for some implementation details.
 
 Sample Data
 ===========
@@ -17,8 +17,8 @@ Controls are WASD and cursor keys for the camera.
 
 Requirements
 ============
-- An AVX2-capable CPU (Haswell, Excavator or later)
-- Visual Studio 2015 or higher
+- An AVX2 and FMA3 capable CPU (Haswell, Excavator or later)
+- Visual Studio 2017 or higher
 
 License
 ============
