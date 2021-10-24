@@ -91,6 +91,10 @@ std::unique_ptr<Occluder> Occluder::bake(const std::vector<__m128>& vertices, __
       }
     }
   }
+  const uint32_t unpaddedSize = orderedVertices.size();
+  // pad to 32 elements so that the transformation loop does not break
+  while (orderedVertices.size() % 32 != 0)
+	  orderedVertices.push_back(orderedVertices.back());
 
   auto occluder = std::make_unique<Occluder>();
 
@@ -155,6 +159,8 @@ std::unique_ptr<Occluder> Occluder::bake(const std::vector<__m128>& vertices, __
 	occluder->m_vertexData[occluder->m_packetCount++] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + 4));
 	occluder->m_vertexData[occluder->m_packetCount++] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + 6));
   }
+  // truncate to the original unpadded size
+  orderedVertices.resize(unpaddedSize);
 
   occluder->m_refMin = refMin;
   occluder->m_refMax = refMax;
