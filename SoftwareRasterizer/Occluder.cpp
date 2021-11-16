@@ -10,6 +10,7 @@ std::unique_ptr<Occluder> Occluder::bake(const std::vector<__m128>& vertices, __
 
   // Simple k-means clustering by normal direction to improve backface culling efficiency
   std::vector<__m128> quadNormals;
+  quadNormals.reserve(vertices.size());
   for (auto i = 0; i < vertices.size(); i += 4)
   {
     auto v0 = vertices[i + 0];
@@ -20,16 +21,15 @@ std::unique_ptr<Occluder> Occluder::bake(const std::vector<__m128>& vertices, __
     quadNormals.push_back(normalize(_mm_add_ps(normal(v0, v1, v2), normal(v0, v2, v3))));
   }
 
-  std::vector<__m128> centroids;
-  std::vector<uint32_t> centroidAssignment;
-  centroids.push_back(_mm_setr_ps(+1.0f, 0.0f, 0.0f, 0.0f));
-  centroids.push_back(_mm_setr_ps(0.0f, +1.0f, 0.0f, 0.0f));
-  centroids.push_back(_mm_setr_ps(0.0f, 0.0f, +1.0f, 0.0f));
-  centroids.push_back(_mm_setr_ps(0.0f, -1.0f, 0.0f, 0.0f));
-  centroids.push_back(_mm_setr_ps(0.0f, 0.0f, -1.0f, 0.0f));
-  centroids.push_back(_mm_setr_ps(-1.0f, 0.0f, 0.0f, 0.0f));
-
-  centroidAssignment.resize(vertices.size() / 4);
+  std::vector<__m128> centroids = {
+	_mm_setr_ps(+1.0f, 0.0f, 0.0f, 0.0f),
+	_mm_setr_ps(0.0f, +1.0f, 0.0f, 0.0f),
+	_mm_setr_ps(0.0f, 0.0f, +1.0f, 0.0f),
+	_mm_setr_ps(0.0f, -1.0f, 0.0f, 0.0f),
+	_mm_setr_ps(0.0f, 0.0f, -1.0f, 0.0f),
+	_mm_setr_ps(-1.0f, 0.0f, 0.0f, 0.0f),
+  };
+  std::vector<uint32_t> centroidAssignment(vertices.size() / 4);
 
   bool anyChanged = true;
   for (int iter = 0; iter < 10 && anyChanged; ++iter)
@@ -78,6 +78,7 @@ std::unique_ptr<Occluder> Occluder::bake(const std::vector<__m128>& vertices, __
   }
 
   std::vector<__m128> orderedVertices;
+  orderedVertices.reserve(centroids.size() * vertices.size()); // worst case
   for (uint32_t k = 0; k < centroids.size(); ++k)
   {
     for (int j = 0; j < vertices.size() / 4; ++j)
@@ -91,6 +92,10 @@ std::unique_ptr<Occluder> Occluder::bake(const std::vector<__m128>& vertices, __
       }
     }
   }
+  const uint32_t unpaddedSize = orderedVertices.size();
+  // pad to 32 elements so that the transformation loop does not break
+  while (orderedVertices.size() % 32 != 0)
+	  orderedVertices.push_back(orderedVertices.back());
 
   auto occluder = std::make_unique<Occluder>();
 
@@ -155,6 +160,8 @@ std::unique_ptr<Occluder> Occluder::bake(const std::vector<__m128>& vertices, __
 	occluder->m_vertexData[occluder->m_packetCount++] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + 4));
 	occluder->m_vertexData[occluder->m_packetCount++] = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v + 6));
   }
+  // truncate to the original unpadded size
+  orderedVertices.resize(unpaddedSize);
 
   occluder->m_refMin = refMin;
   occluder->m_refMax = refMax;

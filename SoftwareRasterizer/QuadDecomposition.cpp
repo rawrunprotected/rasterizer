@@ -345,9 +345,10 @@ namespace
 
 std::vector<uint32_t> QuadDecomposition::decompose(const std::vector<uint32_t>& indices, const std::vector<__m128>& vertices)
 {
-  std::vector<uint32_t> result;
-
   size_t triangleCount = indices.size() / 3;
+
+  std::vector<uint32_t> result;
+  result.reserve(triangleCount * 4); // worst case
 
   Graph candidateGraph;
   candidateGraph.m_adjacencyList.resize(triangleCount);
